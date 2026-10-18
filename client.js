@@ -72,6 +72,58 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The closing turn's number.
+     *
+     * The slot hands this entry a `TurnLocation`, not a bare number: reading it
+     * as a turn number silently produced `"[object Object]"` and every lookup
+     * missed. Accept either shape, and fall back through the plausible numeric
+     * fields the location carries.
+     * @param turn - owner `TurnLocation` or a plain turn number.
+     * @returns the turn number, or undefined when nothing numeric is found.
+     */
+    function turnNumberOf(turn) {
+      if (typeof turn === 'number' && Number.isFinite(turn)) return turn
+      if (turn !== null && typeof turn === 'object') {
+        for (const field of ['turn', 'index', 'number', 'id']) {
+          const value = turn[field]
+          if (typeof value === 'number' && Number.isFinite(value)) return value
+          if (typeof value === 'string' && value !== '' && Number.isFinite(Number(value))) return Number(value)
+        }
+      }
+      const numeric = Number(turn)
+      return Number.isFinite(numeric) ? numeric : undefined
+    }
+
+    /**
+     * One in-flight direct read per session.
+     *
+     * The pushed `recap` projection is the live channel, but a page can end up
+     * holding a stale copy: the Host only broadcasts a unit when its view
+     * changes, so a client that re-seeded from an older baseline has nothing to
+     * correct it. When the pushed value has no entry for a closed turn, the
+     * component asks the Host directly and renders from that answer.
+     */
+    const projectionReads = new Map()
+
+    /** Direct read of this session's recap projection, deduplicated per page. */
+    function readProjectionTurns(sessionId, loadRecap) {
+      const existing = projectionReads.get(sessionId)
+      if (existing !== undefined) return existing
+      const request = Promise.resolve()
+        .then(() => loadRecap())
+        .then(
+          (value) => (value !== null && typeof value === 'object' ? value : undefined),
+          () => undefined,
+        )
+        .then((value) => {
+          projectionReads.delete(sessionId)
+          return value
+        })
+      projectionReads.set(sessionId, request)
+      return request
+    }
+
+    /**
      * Closing-turn recap over the Host's `recap` projection.
      *
      * The Host wrote the text before the turn boundary committed. Whether the
@@ -87,10 +139,17 @@ window.__ModuleLoader__.load({
     function TurnRecap(props) {
       const turn = props.turn
       const useProjection = props.useProjection
+      const loadRecap = props.loadRecap
       const t = props.t
+      const sessionId = typeof props.sessionId === 'string' ? props.sessionId : ''
       const projection = typeof useProjection === 'function' ? useProjection(PROJECTION) : undefined
-      const turns = projection !== null && typeof projection === 'object' ? projection.turns : undefined
-      const entry = turns !== null && typeof turns === 'object' ? turns[String(turn)] : undefined
+      const pushedTurns = projection !== null && typeof projection === 'object' ? projection.turns : undefined
+      const turnNumber = turnNumberOf(turn)
+      const pickEntry = (map) =>
+        map !== null && typeof map === 'object' && turnNumber !== undefined ? map[String(turnNumber)] : undefined
+      const [readTurns, setReadTurns] = React.useState(undefined)
+      const pushedEntry = pickEntry(pushedTurns)
+      const entry = pushedEntry ?? pickEntry(readTurns)
       const ready = entry !== null && typeof entry === 'object' && typeof entry.text === 'string' && entry.text !== ''
       // An entry cached before reveal timing existed has no `revealAt`; 0 keeps
       // it visible instead of hiding history behind a window it predates.
@@ -98,6 +157,19 @@ window.__ModuleLoader__.load({
       const superseded = ready && entry.superseded === true
       const due = ready && !superseded && Date.now() >= revealAt
       const [, tick] = React.useState(0)
+      const attemptedRead = React.useRef(false)
+
+      React.useEffect(() => {
+        if (ready || attemptedRead.current || typeof loadRecap !== 'function' || sessionId === '') return undefined
+        attemptedRead.current = true
+        let alive = true
+        readProjectionTurns(sessionId, loadRecap).then((value) => {
+          if (alive && value !== undefined) setReadTurns(value)
+        })
+        return () => {
+          alive = false
+        }
+      }, [ready, loadRecap, sessionId])
 
       React.useEffect(() => {
         if (ready === false || superseded || due) return undefined
@@ -147,6 +219,11 @@ window.__ModuleLoader__.load({
        * @param ctx - client root context.
        */
       apply(ctx) {
+        // A previous diagnostic build wrote into the window title; clear it so
+        // the shell can own the title again.
+        try {
+          if (typeof document !== 'undefined' && String(document.title).startsWith('RCDIAG')) document.title = ''
+        } catch {}
         ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'turn-recap: dictionaries')
         ctx.slots.inject('conversation.chat.turnTail', () =>
           ctx.slots.register(
@@ -155,6 +232,22 @@ window.__ModuleLoader__.load({
               id: '@local/dsh-turn-recap',
               order: 40,
               locale: NS,
+              // Repair path for a stale pushed copy: read the session's exact
+              // projections straight from the Host when the entry is missing.
+              // Both hops stay optional, so a composition without the session
+              // remote still loads this entry.
+              inject: (sessionId) => ({
+                loadRecap: async () => {
+                  const sessionRemote = ctx.remote?.session
+                  if (sessionRemote === undefined) return undefined
+                  const result = await sessionRemote.projections({ sessionId })
+                  if (result === null || typeof result !== 'object' || result.ok !== true) return undefined
+                  const value = result.value
+                  if (value === null || typeof value !== 'object' || value.kind !== 'sequenced') return undefined
+                  const recap = value.values?.[PROJECTION]
+                  return recap !== null && typeof recap === 'object' ? recap.turns : undefined
+                },
+              }),
             },
             TurnRecap,
           ),
