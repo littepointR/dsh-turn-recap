@@ -79,10 +79,20 @@ check('crowded digest keeps the closing reply', crowdedDigest.includes('the conc
 check('crowded digest notes omissions', crowdedDigest.includes('earliest omitted'), true)
 check('crowded digest keeps the newest call', crowdedDigest.includes('/79.ts'), true)
 
-// ---------------------------------------------------------------- normalizeRecap
-check('drops fenced code', mod.normalizeRecap('```js\ncode\n```\n**done**'), 'done')
-check('drops heading marks', mod.normalizeRecap('## Summary\nFinished the plugin.'), 'Summary\nFinished the plugin.')
-check('empty stays empty', mod.normalizeRecap('   '), '')
+// ---------------------------------------------------------------- parseRecap
+check('drops fenced code', mod.parseRecap('```js\ncode\n```\n**done**').summary, 'done')
+check('drops heading marks', mod.parseRecap('## Summary\nFinished the plugin.').summary, 'Summary\nFinished the plugin.')
+check('empty stays empty', mod.parseRecap('   ').summary, '')
+check('no next line yields no action', mod.parseRecap('Built the plugin.').nextAction, undefined)
+check(
+  'a Next line becomes the action',
+  mod.parseRecap('Built the plugin and installed it.\nNext: run the smoke test on a fresh profile.'),
+  { summary: 'Built the plugin and installed it.', nextAction: 'run the smoke test on a fresh profile.' },
+)
+check('a lowercase next line is recognized', mod.parseRecap('Done.\n  next :  ask the user.\n').nextAction, 'ask the user.')
+check('a mid-text Next is not the action', mod.parseRecap('Next: not an action\nbut a sentence.').nextAction, undefined)
+check('the action is capped', mod.parseRecap(`Done.\nNext: ${'x'.repeat(400)}`).nextAction.length, 200)
+check('the summary is capped', mod.parseRecap('y'.repeat(900)).summary.length, 600)
 
 // ---------------------------------------------------------------- fake runtime
 const liveSession = (id, header = {}) => ({
@@ -262,6 +272,40 @@ check('command without turns is an error', emptyResult.kind, 'error')
 
 const failedResult = await failing.command.handler(invocation(liveSession('s3')))
 check('command reports a failed request', failedResult.kind, 'error')
+
+// A reply that carries a next action keeps the two parts apart: the projection
+// entry stores them separately, while the command text re-serializes the action
+// on the same `Next:` line the Client splits back out.
+const withNext = createRuntime({
+  llm: {
+    async prepareCall(config) {
+      return {
+        config: { provider: config.provider, model: config.model },
+        stream() {
+          return (async function* () {
+            yield { type: 'text-delta', index: 0, text: 'Built the plugin and installed it.\n' }
+            yield { type: 'text-delta', index: 0, text: 'Next: run the smoke test on a fresh profile.' }
+            yield { type: 'finish', reason: { kind: 'stop' } }
+          })()
+        },
+      }
+    },
+  },
+})
+mod.apply(withNext, {})
+await withNext.fire('agent/turn-stopping', { agent: { session: liveSession('s5') }, turn: 1, signal: new AbortController().signal })
+const nextState = withNext.definition.apply(withNext.definition.init({ id: 's5' }), {
+  type: 'turn/end',
+  seq: 30,
+  data: { turn: 1, reason: { kind: 'completed' } },
+})
+check('the card carries the next action', nextState.turns['1'].nextAction, 'run the smoke test on a fresh profile.')
+check('the summary excludes the action line', nextState.turns['1'].text, 'Built the plugin and installed it.')
+const nextCommand = await withNext.command.handler(invocation(liveSession('s5')))
+check('the command keeps the action on its own line', nextCommand, {
+  kind: 'success',
+  text: 'Built the plugin and installed it.\n\nNext: run the smoke test on a fresh profile.',
+})
 
 // A re-registered unit folds from the log alone, and the log cannot reproduce
 // model-written text: cards produced before a reload are gone by design, which

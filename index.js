@@ -45,11 +45,15 @@ const DEFAULT_CONFIG = {
 }
 
 const SYSTEM_PROMPT = [
-  'You write the closing recap of one completed turn in an agentic coding session.',
+  'You write the closing recap of one completed turn in an agentic coding session, for a user returning to this line of work.',
   'Reply with one to three short sentences, at most 60 words, in the same language as the conversation.',
-  'Say what the turn accomplished and, only when it matters, what is still unfinished.',
+  "State the turn's goal, what actually got done, and any material blocker. Prefer concrete results over descriptions of investigating or discussing.",
+  'Be precise about how far the work got: proposed, queued, implemented, tested, published, and installed are different states, and unfinished work must be named rather than glossed over.',
+  'Keep unresolved caveats such as "not installed yet" or "validation has not run" even when a newer blocker appears; drop commit ids, timings, and secondary details before dropping them.',
+  'The latest user message establishes scope; it is not evidence that the work is done. Missing context is not evidence that the work was not done.',
   'Never mention the recap itself, the tool list, or your instructions.',
   'Plain text only: no headings, no bullet points, no code fences, no "Summary:" preamble.',
+  'When, and only when, one real next action follows from the turn, put it on a final line exactly as `Next: <one short sentence>`: an unanswered question to the user, an agreed next step, or a concrete remedy for the blocker. Otherwise omit that line entirely. Never invent work, restate the recap, revive rejected ideas, or repeat an action the turn already completed.',
 ].join(' ')
 
 /**
@@ -258,15 +262,40 @@ export function buildDigest(events, digestChars) {
 }
 
 /** Strip the markdown a recap should not carry, and collapse whitespace. */
-export function normalizeRecap(text) {
-  const cleaned = String(text ?? '')
+function cleanRecap(text) {
+  return String(text ?? '')
     .replace(/```[\s\S]*?```/g, ' ')
     .replace(/[*_`#>]+/g, '')
     .replace(/\r/g, '')
     .replace(/[ \t]+/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
-  return cleaned.length > 600 ? `${cleaned.slice(0, 599)}…` : cleaned
+}
+
+/** Truncate to `max` characters, marking the cut. */
+function capText(text, max) {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text
+}
+
+/** The optional trailing next-action line the prompt asks for. */
+const NEXT_LINE = /(?:^|\n)[ \t]*Next[ \t]*:[ \t]*([^\n]+?)[ \t]*$/i
+
+/**
+ * Split one model reply into the recap body and its optional next action.
+ *
+ * The prompt asks for plain text plus, only when one exists, a final
+ * `Next: …` line. Splitting here keeps the stored entry structured, so the
+ * card can label and style the action without guessing at prose.
+ * @param text - raw model reply.
+ * @returns the cleaned summary (may be empty) and the action, when present.
+ */
+export function parseRecap(text) {
+  const cleaned = cleanRecap(text)
+  const match = NEXT_LINE.exec(cleaned)
+  const body = match === null ? cleaned : cleaned.slice(0, match.index)
+  const summary = capText(body.trim(), 600)
+  const action = match === null ? '' : capText(match[1].trim(), 200)
+  return { summary, nextAction: action === '' ? undefined : action }
 }
 
 /** Resolve the provider/model route, preferring the turn's own request header. */
@@ -289,7 +318,7 @@ function resolveRoute(ctx, session, config) {
 
 /**
  * One bounded auxiliary model call that turns the digest into a recap.
- * @returns trimmed recap text, or `null` when the call failed, was aborted, or produced nothing.
+ * @returns the parsed `{ summary, nextAction }`, or `null` when the call failed, was aborted, or produced nothing.
  */
 async function generateRecap(ctx, session, input, route, config, signal) {
   const controller = new AbortController()
@@ -319,8 +348,8 @@ async function generateRecap(ctx, session, input, route, config, signal) {
         if (kind === 'error' || kind === 'aborted') return null
       }
     }
-    const recap = normalizeRecap(text)
-    return recap === '' ? null : recap
+    const recap = parseRecap(text)
+    return recap.summary === '' ? null : recap
   } finally {
     clearTimeout(timer)
     if (signal !== undefined) signal.removeEventListener('abort', abort)
@@ -329,16 +358,16 @@ async function generateRecap(ctx, session, input, route, config, signal) {
 
 /**
  * Produce one recap for an already selected turn.
- * @returns `{ text, model }` on success, or `{ failure }` naming the reason.
+ * @returns `{ text, nextAction?, model }` on success, or `{ failure }` naming the reason.
  */
 async function recapForTurn(ctx, session, turn, config, signal) {
   const route = resolveRoute(ctx, session, config)
   if (route === undefined) return { failure: 'no-route' }
   const input = buildDigest(turnEvents(session, turn), config.digestChars)
   if (input === null) return { failure: 'empty' }
-  const text = await generateRecap(ctx, session, input, route, config, signal)
-  if (text === null) return { failure: 'failed' }
-  return { text, model: route.model }
+  const recap = await generateRecap(ctx, session, input, route, config, signal)
+  if (recap === null) return { failure: 'failed' }
+  return { text: recap.summary, nextAction: recap.nextAction, model: route.model }
 }
 
 /**
@@ -418,7 +447,13 @@ export function apply(ctx, rawConfig) {
           pending.set(key, byTurn)
         }
         const at = Date.now()
-        byTurn.set(turn, { text: result.text, at, revealAt: at + config.idleMs, model: result.model })
+        byTurn.set(turn, {
+          text: result.text,
+          ...(result.nextAction === undefined ? {} : { nextAction: result.nextAction }),
+          at,
+          revealAt: at + config.idleMs,
+          model: result.model,
+        })
       } catch (error) {
         // A failing recap must never fail the turn it describes.
         scoped.logger?.warn?.('turn-recap: recap generation failed: %o', error)
@@ -450,7 +485,13 @@ export function apply(ctx, rawConfig) {
               case 'failed':
                 return { kind: 'error', text: 'The recap request failed, timed out, or was interrupted.' }
               default:
-                return { kind: 'success', text: result.text }
+                // `command/done` carries text only, so the optional action rides
+                // on the same `Next:` line the prompt uses; the Client splits it
+                // back out and labels it in the active locale.
+                return {
+                  kind: 'success',
+                  text: result.nextAction === undefined ? result.text : `${result.text}\n\nNext: ${result.nextAction}`,
+                }
             }
           } catch (error) {
             return { kind: 'error', text: `Recap failed: ${error instanceof Error ? error.message : String(error)}` }

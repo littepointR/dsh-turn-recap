@@ -26,6 +26,10 @@ window.__ModuleLoader__.load({
       'white-space:pre-wrap;overflow-wrap:anywhere;}',
       '.dsh-turn-recap__text[data-error]{color:var(--dsw-alias-state-error-primary);}',
       '.dsh-turn-recap__text[data-pending]{color:var(--dsw-alias-label-secondary);font-style:italic;}',
+      '.dsh-turn-recap__next{display:flex;align-items:baseline;gap:8px;margin-top:2px;padding-top:6px;',
+      'border-top:1px solid var(--dsw-alias-border-l1);font-size:13px;line-height:1.6;color:var(--dsw-alias-label-primary);}',
+      '.dsh-turn-recap__next-label{flex:0 0 auto;color:var(--dsw-alias-brand-primary);font-weight:500;}',
+      '.dsh-turn-recap__next-text{flex:1 1 auto;min-width:0;white-space:pre-wrap;overflow-wrap:anywhere;}',
     ].join('')
 
     /** Simplified Chinese dictionary (the key-set source of truth). */
@@ -33,6 +37,7 @@ window.__ModuleLoader__.load({
       title: '本轮小结',
       pending: '正在生成小结…',
       failed: '未能生成小结',
+      next: '下一步',
     }
 
     /** English dictionary, checked complete against the zh key set. */
@@ -40,6 +45,7 @@ window.__ModuleLoader__.load({
       title: 'Turn recap',
       pending: 'Generating a recap…',
       failed: 'No recap available',
+      next: 'Next step',
     }
 
     /** Four-point spark, drawn in the current text color. */
@@ -54,8 +60,25 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** Shared card chrome: icon, title, trailing meta, and one body line. */
-    function Card({ label, meta, body, state }) {
+    /**
+     * Split the optional trailing `Next:` line off a rendered recap.
+     *
+     * The Host already parses the model's action out of the projection entry,
+     * but `command/done` carries text only, so the action rides on that same
+     * line there. One convention, two carriers.
+     * @param text - recap body, possibly ending with a `Next: …` line.
+     * @returns the body and the optional action.
+     */
+    function splitNext(text) {
+      const source = typeof text === 'string' ? text : ''
+      const match = /(?:^|\n)[ \t]*Next[ \t]*:[ \t]*([\s\S]+?)[ \t]*$/i.exec(source)
+      if (match === null) return { body: source, next: undefined }
+      const action = match[1].trim()
+      return { body: source.slice(0, match.index).trim(), next: action === '' ? undefined : action }
+    }
+
+    /** Shared card chrome: icon, title, trailing meta, body, and optional next step. */
+    function Card({ label, meta, body, next, nextLabel, state }) {
       return h(
         'section',
         { className: 'dsh-turn-recap', 'aria-label': label },
@@ -68,6 +91,14 @@ window.__ModuleLoader__.load({
           typeof meta === 'string' && meta !== '' ? h('span', { className: 'dsh-turn-recap__meta' }, meta) : null,
         ),
         h('p', { className: 'dsh-turn-recap__text', 'data-error': state === 'error' || undefined, 'data-pending': state === 'pending' || undefined }, body),
+        typeof next === 'string' && next !== ''
+          ? h(
+              'div',
+              { className: 'dsh-turn-recap__next' },
+              h('span', { className: 'dsh-turn-recap__next-label' }, nextLabel),
+              h('span', { className: 'dsh-turn-recap__next-text' }, next),
+            )
+          : null,
       )
     }
 
@@ -180,7 +211,15 @@ window.__ModuleLoader__.load({
       if (!due) return null
       const label = typeof t === 'function' ? t('title') : 'Turn recap'
       const model = typeof entry.model === 'string' && entry.model !== '' ? entry.model : null
-      return h(Card, { label, meta: model, body: entry.text, state: 'ok' })
+      const next = typeof entry.nextAction === 'string' && entry.nextAction !== '' ? entry.nextAction : undefined
+      return h(Card, {
+        label,
+        meta: model,
+        body: entry.text,
+        next,
+        nextLabel: typeof t === 'function' ? t('next') : 'Next step',
+        state: 'ok',
+      })
     }
 
     /**
@@ -204,10 +243,13 @@ window.__ModuleLoader__.load({
         })
       }
       const text = typeof outcome.text === 'string' && outcome.text !== '' ? outcome.text : failed
+      const split = outcome.kind === 'error' ? { body: text, next: undefined } : splitNext(text)
       return h(Card, {
         label,
         meta: `/${COMMAND}`,
-        body: text,
+        body: split.body === '' ? failed : split.body,
+        next: split.next,
+        nextLabel: typeof t === 'function' ? t('next') : 'Next step',
         state: outcome.kind === 'error' ? 'error' : 'ok',
       })
     }

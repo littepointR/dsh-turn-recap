@@ -17,6 +17,8 @@ English | [中文](README.zh.md)
   window, when you scrolled past it, or when you want a fresh read of where things stand.
 - Turns that carry nothing to summarize (interrupted or failed turns, empty turns) produce no card, and subagent
   sessions are skipped by default.
+- When the turn leaves exactly one real next action — an unanswered question, an agreed next step, or a remedy for a
+  blocker — the card adds a single **Next step** line under the summary. Turns that finished cleanly get no such line.
 
 The card uses the host's theme tokens, so it follows light/dark and the active locale (English and Simplified Chinese
 dictionaries ship with the bundle).
@@ -130,6 +132,12 @@ turn/end (committed) ──▶ projection apply ──▶ recap projection ─�
 3. The Client half registers into the **`conversation.chat.turnTail`** slot and reads the projection with
    `useProjection("recap")`. Each entry carries a `revealAt` deadline: the card is held back until that instant passes
    **and** no newer turn has started, so the quiet window costs nothing and the card never interrupts active work.
+
+**What the model is asked for.** One plain-text prompt: one to three sentences in the conversation's language, precise
+about how far the work actually got (`proposed`, `queued`, `implemented`, `tested`, `published`, and `installed` are
+different states), keeping unresolved caveats such as "not installed yet", and treating the latest user message as
+scope rather than proof that the work is done. A real next action — and only a real one — rides in on a final `Next:`
+line, which the Host parses into its own field so the card can label and style it.
 
 **Why a projection instead of a session event?** A plugin may not append new event types: a log carrying a type the
 build does not know cannot be reopened, and `appendPluginRecord()` is reserved for first-party experimental packages.
