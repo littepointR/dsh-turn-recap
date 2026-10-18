@@ -9,10 +9,12 @@ English | [中文](README.zh.md)
 
 ## What it does
 
-- **After every completed turn** a quiet card appears at the end of the turn: one to three sentences saying what the
-  turn accomplished and, only when it matters, what is still unfinished. The text follows the conversation's language.
-- **`/recap`** produces the same card for the latest turn on demand — useful when a turn was skipped, when you scrolled
-  past it, or when you want a fresh read of where things stand.
+- **After a turn the session goes quiet** a card appears at the end of that turn: one to three sentences saying what the
+  turn accomplished and, only when it matters, what is still unfinished. The card waits out a quiet window (two minutes
+  by default) and never appears for a turn you kept working past — it is a "where did I leave off" card, not a second
+  summary of a reply you are still reading. The text follows the conversation's language.
+- **`/recap`** produces the same card for the latest turn on demand, immediately — useful when a turn never got its quiet
+  window, when you scrolled past it, or when you want a fresh read of where things stand.
 - Turns that carry nothing to summarize (interrupted or failed turns, empty turns) produce no card, and subagent
   sessions are skipped by default.
 
@@ -53,6 +55,7 @@ package upgrades.
 | `temperature` | `0.2` | Sampling temperature |
 | `timeoutMs` | `12000` | Hard bound on one recap request, in milliseconds |
 | `digestChars` | `6000` | Size bound of the turn digest sent to the model |
+| `idleMs` | `120000` | Quiet window a finished turn must hold before its card may appear; `0` shows it immediately |
 | `skipSubagents` | `true` | Subagent sessions get no automatic recap |
 | `provider`, `model` | unset | Explicit route; by default the turn's own request route is reused |
 
@@ -81,7 +84,8 @@ turn/end (committed) ──▶ projection apply ──▶ recap projection ─�
 2. The following **`turn/end`** commit folds the text into the client-visible **`recap` session projection**, so the
    card and the finished turn arrive in the same frame.
 3. The Client half registers into the **`conversation.chat.turnTail`** slot and reads the projection with
-   `useProjection("recap")`.
+   `useProjection("recap")`. Each entry carries a `revealAt` deadline: the card is held back until that instant passes
+   **and** no newer turn has started, so the quiet window costs nothing and the card never interrupts active work.
 
 **Why a projection instead of a session event?** A plugin may not append new event types: a log carrying a type the
 build does not know cannot be reopened, and `appendPluginRecord()` is reserved for first-party experimental packages.
@@ -89,7 +93,8 @@ The session projection is the supported carrier for session-derived client state
 
 **Why is the recap produced before `turn/end`?** Projection state is folded synchronously from committed events and its
 Value is only re-read when a committed event changes that state. Producing the text while the turn boundary is still
-open is what lets the commitment bake it into state.
+open is what lets the commitment bake it into state — the delayed *appearance* is a client-side rule over the stored
+`revealAt`, not a delayed request.
 
 **`/recap`** is a plain DSH command: it runs outside any turn, and its result travels in `command/done`. The Client half
 claims the command row through the `conversation.chat.commandview` slot under the `recap` key and renders the running,
@@ -100,7 +105,10 @@ success, and failure states itself.
 - **One extra model request per turn.** It is short, but it is billed by your provider; it does not appear in the
   session's token statistics because no assistant message is appended for it.
 - **The turn closes after the recap is ready.** Generation happens before `turn/end`, so a slow provider delays the
-  boundary by up to `timeoutMs`. Failures and timeouts degrade to "no card", never to a failed turn.
+  boundary by up to `timeoutMs`. Failures and timeouts degrade to "no card", never to a failed turn. The quiet window
+  delays only what you see, not what you pay.
+- **A card you never earned stays hidden.** If you send the next prompt before `idleMs` elapses, that turn gets no card;
+  `/recap` is the escape hatch when you want one anyway.
 - **Recap text cannot be re-derived from the log.** It lives in the projection checkpoint, so it survives a restart;
   a projection cell rebuilt from the log alone (for example after the plugin is re-registered) starts empty.
 - **`stateVersion` gates cached wording.** Bumping it discards recaps cached under the previous digest rules instead of

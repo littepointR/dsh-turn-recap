@@ -17,28 +17,16 @@
  * boundary is still open lets the following `turn/end` commit bake it into
  * state, so the client receives it in the same frame that renders the turn
  * tail.
+ *
+ * When the recap *appears* is a separate decision: each entry carries
+ * `revealAt` (`at + config.idleMs`), and the Client half holds the card back
+ * until that instant passes without a newer turn starting. Generating at the
+ * boundary keeps cost and latency predictable; the delay only keeps the card
+ * out of the way while the user is still reading.
  */
 
 /** Projection key shared with the Client half. */
 const RECAP_PROJECTION_KEY = 'recap'
-
-/**
- * Recaps this process already produced, per session.
- *
- * A projection cell is rebuilt by folding `init` over the in-memory log
- * whenever the unit registers again — after a config change, a plugin toggle,
- * or a Host reload. The log cannot reproduce a model-written recap, so without
- * this store a re-registration would silently drop every card the session
- * already showed. The store lives at module scope precisely because the module
- * itself survives those re-registrations.
- */
-const producedRecaps = new Map()
-
-/** Copy of one session's known recaps, safe to seed a fresh fold with. */
-function knownTurns(sessionId) {
-  const turns = producedRecaps.get(String(sessionId))
-  return turns === undefined ? {} : { ...turns }
-}
 
 /** Defaults for every tunable value; a `config` block in cordis.patch.yml overrides them. */
 const DEFAULT_CONFIG = {
@@ -47,6 +35,10 @@ const DEFAULT_CONFIG = {
   temperature: 0.2,
   timeoutMs: 12_000,
   digestChars: 6_000,
+  // How long a finished turn must stay without a new prompt before its card is
+  // allowed to appear. Generation still happens at the boundary; this only
+  // decides when the client may reveal the result. 0 shows it immediately.
+  idleMs: 120_000,
   skipSubagents: true,
   provider: undefined,
   model: undefined,
@@ -78,6 +70,7 @@ export function resolveConfig(raw) {
     temperature: pick(config, 'temperature', DEFAULT_CONFIG.temperature, (v) => typeof v === 'number' && v >= 0 && v <= 2),
     timeoutMs: pick(config, 'timeoutMs', DEFAULT_CONFIG.timeoutMs, (v) => Number.isInteger(v) && v > 0),
     digestChars: pick(config, 'digestChars', DEFAULT_CONFIG.digestChars, (v) => Number.isInteger(v) && v > 0),
+    idleMs: pick(config, 'idleMs', DEFAULT_CONFIG.idleMs, (v) => Number.isInteger(v) && v >= 0),
     skipSubagents: pick(config, 'skipSubagents', DEFAULT_CONFIG.skipSubagents, (v) => typeof v === 'boolean'),
     provider: pick(config, 'provider', undefined, (v) => typeof v === 'string' && v.length > 0),
     model: pick(config, 'model', undefined, (v) => typeof v === 'string' && v.length > 0),
@@ -369,7 +362,7 @@ export function apply(ctx, rawConfig) {
       // version bump discards them rather than serving stale wording.
       stateVersion: 2,
       stateSchema: JSON_SCHEMA,
-      init: (header) => ({ session: String(header.id), turns: knownTurns(header.id) }),
+      init: (header) => ({ session: String(header.id), turns: {} }),
       apply: (state, event) => {
         if (event.type !== 'turn/end') return state
         if (event.data?.reason?.kind !== 'completed') return state
@@ -384,12 +377,7 @@ export function apply(ctx, rawConfig) {
       },
       wire: {
         viewSchema: JSON_SCHEMA,
-        view: (state) => {
-          // Keep the module store aligned with whatever state this cell holds,
-          // including a state restored from a checkpoint row.
-          producedRecaps.set(state.session, state.turns)
-          return { turns: state.turns }
-        },
+        view: (state) => ({ turns: state.turns }),
       },
     })
 
@@ -410,7 +398,8 @@ export function apply(ctx, rawConfig) {
           byTurn = new Map()
           pending.set(key, byTurn)
         }
-        byTurn.set(turn, { text: result.text, at: Date.now(), model: result.model })
+        const at = Date.now()
+        byTurn.set(turn, { text: result.text, at, revealAt: at + config.idleMs, model: result.model })
       } catch (error) {
         // A failing recap must never fail the turn it describes.
         scoped.logger?.warn?.('turn-recap: recap generation failed: %o', error)
@@ -419,9 +408,6 @@ export function apply(ctx, rawConfig) {
 
     scoped.on('session/disposed', (session) => {
       pending.delete(String(session.id))
-      // A reopened session restores its state from the checkpoint row, which
-      // repopulates the store on the next view.
-      producedRecaps.delete(String(session.id))
     })
 
     // `/recap` runs outside any turn (the command lifecycle is log-only), so

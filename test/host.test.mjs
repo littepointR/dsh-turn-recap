@@ -16,6 +16,10 @@ function check(name, actual, expected) {
 const defaults = mod.resolveConfig(undefined)
 check('defaults.enabled', defaults.enabled, true)
 check('defaults.maxTokens', defaults.maxTokens, 200)
+check('defaults.idleMs', defaults.idleMs, 120_000)
+check('idleMs zero is allowed', mod.resolveConfig({ idleMs: 0 }).idleMs, 0)
+check('invalid idleMs falls back', mod.resolveConfig({ idleMs: -5 }).idleMs, 120_000)
+check('explicit idleMs wins', mod.resolveConfig({ idleMs: 90_000 }).idleMs, 90_000)
 check('bad type falls back', mod.resolveConfig({ maxTokens: 'lots', timeoutMs: -1 }).maxTokens, 200)
 check('override', mod.resolveConfig({ maxTokens: 64, enabled: false }).maxTokens, 64)
 check('override.enabled', mod.resolveConfig({ enabled: false }).enabled, false)
@@ -152,6 +156,7 @@ const published = runtime.definition.wire.view(state)
 check('recap visible after turn/end', Object.keys(published.turns), ['2'])
 check('recap text normalized', published.turns['2'].text, 'Built the plugin and wired the projection.')
 check('recap carries model', published.turns['2'].model, 'm1')
+check('recap carries a reveal deadline', published.turns['2'].revealAt - published.turns['2'].at, 120_000)
 
 await runtime.fire('agent/turn-stopping', { agent: { session: liveSession('s1') }, turn: 2, signal: new AbortController().signal })
 check('aborted turn unchanged', runtime.definition.apply(state, { type: 'turn/end', seq: 12, data: { turn: 2, reason: { kind: 'aborted' } } }), state)
@@ -241,18 +246,13 @@ check('command without turns is an error', emptyResult.kind, 'error')
 const failedResult = await failing.command.handler(invocation(liveSession('s3')))
 check('command reports a failed request', failedResult.kind, 'error')
 
-// A re-registered unit re-seeds from recaps this process already produced:
-// the log cannot reproduce model-written text, so a toggle or config change
-// must not silently drop cards the session already showed.
+// A re-registered unit folds from the log alone, and the log cannot reproduce
+// model-written text: cards produced before a reload are gone by design, which
+// is what the README documents.
 const reloaded = createRuntime()
 mod.apply(reloaded, {})
-check('re-registration keeps known recaps', Object.keys(reloaded.definition.init({ id: 's1' }).turns), ['2'])
-check('re-registration keeps the text', reloaded.definition.init({ id: 's1' }).turns['2'].text, 'Built the plugin and wired the projection.')
-check('unknown session starts empty', reloaded.definition.init({ id: 'never-seen' }).turns, {})
-check('disposal forgets the session', (() => {
-  reloaded.fire('session/disposed', { id: 's1' })
-  return Object.keys(reloaded.definition.init({ id: 's1' }).turns)
-})(), [])
+check('re-registration starts from an empty fold', reloaded.definition.init({ id: 's1' }).turns, {})
+check('an unknown session starts empty too', reloaded.definition.init({ id: 'never-seen' }).turns, {})
 
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURE(S)`)
 process.exitCode = failures === 0 ? 0 : 1
