@@ -17,6 +17,28 @@
 
 卡片使用宿主的主题变量，跟随明暗主题与当前语言（随包提供中英两套词条）。
 
+## 环境要求
+
+- **DSH `>=0.2.1-rc.2`** —— 本插件的开发与验证都基于这个运行时版本，`package.json` 用 `engines.dsh` 声明了下限。启动器会在两处校验它：
+  安装 bundle 时，以及包含它的 profile 启动时。运行时低于下限会被 `incompatible-version` 拒绝，并给出未满足的范围。
+- 用 `dsh --version` 查看 profile 实际会用的运行时版本。
+- 这个下限对应的是插件实际绑定的 API 集合，不是拍脑袋定的：`agent/turn-stopping`、带客户端可见 `wire` 视图的 session
+  投影、`commands` 注册表（含 `command/done` 的结果文本）、`llm.prepareCall()` 流式调用，以及客户端的
+  `conversation.chat.turnTail` / `conversation.chat.commandview` 槽位和 `remote.session.projections`。提供了这些 API 的相邻
+  版本大概率也能用，但只有这里声明的下限是实际验证过的组合。
+
+刻意没有声明 `peerDependencies`：这个 bundle 不 import 任何 `@deepseek-ai/*` 模块，只在运行时解析 Cordis 服务，
+写 peer 范围反而是在描述一个并不存在的依赖。
+
+确实要在更低版本上跑，启动器提供的口子是**精确版本豁免**，而不是范围：
+
+```bash
+dsh plugin --profile <profile> allow-version '@local/dsh-turn-recap@1.0.1' --dsh-version '<runtime>' --accept-risk
+```
+
+Plugin Manager 里也有同样的授权入口。它等于让未经验证的进程内代码跑在你的运行时上——文档明确的风险是崩溃与数据丢失，
+而且授权只对一个确切的插件版本 + 一个确切的运行时版本生效。
+
 ## 安装
 
 这是一个 DSH bundle：声明了 `dsh.bundle.patch` 与 `dsh.client` 两半，用启动器自带的插件命令装进 profile，不发布到 npm。
@@ -26,7 +48,7 @@
 dsh plugin add github:littepointR/dsh-turn-recap
 
 # 或锁定 tag 版本
-dsh plugin add github:littepointR/dsh-turn-recap#v1.0.0
+dsh plugin add github:littepointR/dsh-turn-recap#v1.0.1
 ```
 
 `dsh plugin` 会把参数转发给 profile 目录里的 pnpm，安装成功后选中该 bundle。profile 的 YAML 里启用了 HMR 时组合会立即重载，

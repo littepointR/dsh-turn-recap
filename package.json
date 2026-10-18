@@ -1,11 +1,14 @@
 {
   "name": "@local/dsh-turn-recap",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "Short model-written recap once a finished turn goes quiet in the DSH Web UI, plus an on-demand /recap command.",
   "license": "MIT",
   "author": "littepoint",
+  "engines": {
+    "dsh": ">=0.2.1-rc.2"
+  },
   "homepage": "https://github.com/littepointR/dsh-turn-recap#readme",
   "repository": {
     "type": "git",

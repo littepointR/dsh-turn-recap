@@ -21,6 +21,31 @@ English | [中文](README.zh.md)
 The card uses the host's theme tokens, so it follows light/dark and the active locale (English and Simplified Chinese
 dictionaries ship with the bundle).
 
+## Requirements
+
+- **DSH `>=0.2.1-rc.2`** — the runtime this plugin was built and verified against. `package.json` declares that floor as
+  `engines.dsh`, and the launcher enforces it twice: when the bundle is installed, and again when a profile holding it
+  starts. An older runtime refuses the operation with `incompatible-version` and names the unmet range.
+- Check which runtime a profile will use with `dsh --version`.
+- The floor is the API set this plugin binds, not a guess: `agent/turn-stopping`, session projections with a
+  client-visible `wire` view, the `commands` registry (including `command/done` result text), `llm.prepareCall()`
+  streaming, and on the Client side the `conversation.chat.turnTail` and `conversation.chat.commandview` slots plus
+  `remote.session.projections`. A nearby version that provides all of them will almost certainly work, but only the
+  declared floor is the combination tested here.
+
+No `peerDependencies` are declared on purpose: this bundle imports no `@deepseek-ai/*` module — it only resolves Cordis
+services at runtime — so a peer range would describe a dependency that does not exist.
+
+If you must run it on an older runtime, the launcher's escape hatch is an exact-version exemption, never a range:
+
+```bash
+dsh plugin --profile <profile> allow-version '@local/dsh-turn-recap@1.0.1' --dsh-version '<runtime>' --accept-risk
+```
+
+The same grant is available in Plugin Manager. It authorizes in-process code against a runtime it was never verified
+with — crashes and data loss are the documented risk — and it applies to one exact plugin version on one exact runtime
+version.
+
 ## Install
 
 This package is a DSH bundle: it declares `dsh.bundle.patch` and a `dsh.client` half, so it installs into a profile with
@@ -31,7 +56,7 @@ the launcher's own plugin command. Nothing is published to npm.
 dsh plugin add github:littepointR/dsh-turn-recap
 
 # or pin the tagged release
-dsh plugin add github:littepointR/dsh-turn-recap#v1.0.0
+dsh plugin add github:littepointR/dsh-turn-recap#v1.0.1
 ```
 
 `dsh plugin` forwards to pnpm inside the profile directory and selects the bundle when the install finishes. With HMR
