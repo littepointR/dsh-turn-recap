@@ -23,22 +23,41 @@ dictionaries ship with the bundle).
 
 ## Install
 
-The bundle is a local DSH plugin package: it declares `dsh.bundle.patch` and a `dsh.client` half, and it is installed
-into a profile rather than published to npm.
+This package is a DSH bundle: it declares `dsh.bundle.patch` and a `dsh.client` half, so it installs into a profile with
+the launcher's own plugin command. Nothing is published to npm.
 
 ```bash
-git clone https://github.com/littepointR/dsh-turn-recap.git
+# newest commit on the default branch
+dsh plugin add github:littepointR/dsh-turn-recap
+
+# or pin the tagged release
+dsh plugin add github:littepointR/dsh-turn-recap#v1.0.0
 ```
 
-Then install the directory as a bundle in your DSH profile — in a DSH session, ask the agent to install the bundle from
-that absolute path (it uses the profile's plugin manager), or run the equivalent install from your own tooling. The
-bundle patch adds one Loader row:
+`dsh plugin` forwards to pnpm inside the profile directory and selects the bundle when the install finishes. With HMR
+enabled in the profile's YAML the composition reloads immediately; otherwise the profile picks it up on the next start.
+Install into a named profile by passing it through:
+
+```bash
+dsh plugin --profile <name> add github:littepointR/dsh-turn-recap
+```
+
+The bundle patch adds one Loader row:
 
 ```yaml
 - insert:
     - id: turn-recap
       name: '@local/dsh-turn-recap'
 ```
+
+### From a checkout
+
+```bash
+git clone https://github.com/littepointR/dsh-turn-recap.git
+dsh plugin --profile <name> add link:D:/path/to/dsh-turn-recap
+```
+
+Or ask a DSH session to install the bundle from that directory with the profile's plugin manager.
 
 Reinstalling or toggling the plugin needs no Harness restart: disable and re-enable the row and the Host module is
 imported again.

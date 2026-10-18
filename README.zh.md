@@ -19,20 +19,39 @@
 
 ## 安装
 
-这是一个本地 DSH 插件包：声明了 `dsh.bundle.patch` 与 `dsh.client` 两半，安装进 profile，不发布到 npm。
+这是一个 DSH bundle：声明了 `dsh.bundle.patch` 与 `dsh.client` 两半，用启动器自带的插件命令装进 profile，不发布到 npm。
 
 ```bash
-git clone https://github.com/littepointR/dsh-turn-recap.git
+# 默认分支最新提交
+dsh plugin add github:littepointR/dsh-turn-recap
+
+# 或锁定 tag 版本
+dsh plugin add github:littepointR/dsh-turn-recap#v1.0.0
 ```
 
-然后在你的 DSH profile 里把这个目录作为 bundle 安装——在 DSH 会话里让 agent 用插件的绝对路径执行安装（走 profile 的
-plugin manager），或用你自己的工具做等价安装。bundle 的 patch 会插入一行 Loader 配置：
+`dsh plugin` 会把参数转发给 profile 目录里的 pnpm，安装成功后选中该 bundle。profile 的 YAML 里启用了 HMR 时组合会立即重载，
+否则下次启动生效。装进指定 profile 时把 profile 名传进去：
+
+```bash
+dsh plugin --profile <name> add github:littepointR/dsh-turn-recap
+```
+
+bundle 的 patch 会插入一行 Loader 配置：
 
 ```yaml
 - insert:
     - id: turn-recap
       name: '@local/dsh-turn-recap'
 ```
+
+### 从本地检出安装
+
+```bash
+git clone https://github.com/littepointR/dsh-turn-recap.git
+dsh plugin --profile <name> add link:D:/path/to/dsh-turn-recap
+```
+
+也可以在 DSH 会话里让 agent 用 profile 的 plugin manager 从这个目录安装。
 
 重新安装或启停插件不需要重启 Harness：禁用再启用该行即可重新导入宿主模块。
 
