@@ -156,9 +156,12 @@ success, and failure states itself.
 
 - **One extra model request per turn.** It is short, but it is billed by your provider; it does not appear in the
   session's token statistics because no assistant message is appended for it.
+- **A failed recap never fails the turn.** `/recap` names the reason — a timeout, an interruption, a provider refusal with
+  its code, or an answer that carried no recap text — and the automatic path records the same reason in the projection
+  instead of staying silent. The request also asks for the route's lowest reasoning effort, so the small output budget
+  is not spent thinking.
 - **The turn closes after the recap is ready.** Generation happens before `turn/end`, so a slow provider delays the
-  boundary by up to `timeoutMs`. Failures and timeouts degrade to "no card", never to a failed turn. The quiet window
-  delays only what you see, not what you pay.
+  boundary by up to `timeoutMs`. The quiet window delays only what you see, not what you pay.
 - **A card you never earned stays hidden.** If you send the next prompt before `idleMs` elapses, that turn gets no card;
   `/recap` is the escape hatch when you want one anyway.
 - **Recap text cannot be re-derived from the log.** It lives in the projection checkpoint, so it survives a restart;

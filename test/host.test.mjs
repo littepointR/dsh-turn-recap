@@ -236,10 +236,45 @@ const errorFinish = createRuntime({
 })
 mod.apply(errorFinish, {})
 await errorFinish.fire('agent/turn-stopping', { agent: { session: liveSession('s4') }, turn: 1, signal: new AbortController().signal })
-check('error finish publishes nothing', errorFinish.definition.apply(
-  errorFinish.definition.init({ id: 's4' }),
-  { type: 'turn/end', seq: 21, data: { turn: 1, reason: { kind: 'completed' } } },
-).turns, {})
+const errorFinishState = errorFinish.definition.apply(errorFinish.definition.init({ id: 's4' }), {
+  type: 'turn/end',
+  seq: 21,
+  data: { turn: 1, reason: { kind: 'completed' } },
+})
+check('error finish publishes no card', errorFinishState.turns, {})
+check('error finish checkpoints the reason', errorFinishState.lastFailure, {
+  turn: 1,
+  at: errorFinishState.lastFailure.at,
+  reason: 'provider',
+  code: 'y',
+  message: 'x',
+})
+
+// A slow provider that outlives the deadline reports a timeout, not a generic
+// failure, and says so in the command result.
+const slow = createRuntime({
+  llm: {
+    async prepareCall(config) {
+      return {
+        config: { provider: config.provider, model: config.model },
+        stream() {
+          return (async function* () {
+            await new Promise((resolve) => setTimeout(resolve, 40))
+            yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'aborted', code: 'ABORTED' } } }
+          })()
+        },
+      }
+    },
+  },
+})
+mod.apply(slow, { timeoutMs: 10 })
+await slow.fire('agent/turn-stopping', { agent: { session: liveSession('s6') }, turn: 1, signal: new AbortController().signal })
+const slowState = slow.definition.apply(slow.definition.init({ id: 's6' }), {
+  type: 'turn/end',
+  seq: 22,
+  data: { turn: 1, reason: { kind: 'completed' } },
+})
+check('a slow provider is recorded as a timeout', slowState.lastFailure.reason, 'timeout')
 
 // Disabled config registers nothing at all.
 const disabled = createRuntime()

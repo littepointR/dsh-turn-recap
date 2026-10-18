@@ -318,12 +318,20 @@ function resolveRoute(ctx, session, config) {
 
 /**
  * One bounded auxiliary model call that turns the digest into a recap.
- * @returns the parsed `{ summary, nextAction }`, or `null` when the call failed, was aborted, or produced nothing.
+ *
+ * The failure kinds stay distinct instead of collapsing into one `null`: a
+ * caller that only says "failed" cannot tell a slow provider from a refused
+ * request, and the two need different advice.
+ * @returns `{ recap }` on success, or `{ failure, code?, message? }` naming why not.
  */
 async function generateRecap(ctx, session, input, route, config, signal) {
   const controller = new AbortController()
+  let timedOut = false
   const abort = () => controller.abort()
-  const timer = setTimeout(abort, config.timeoutMs)
+  const timer = setTimeout(() => {
+    timedOut = true
+    abort()
+  }, config.timeoutMs)
   if (signal !== undefined) {
     if (signal.aborted) abort()
     else signal.addEventListener('abort', abort, { once: true })
@@ -332,6 +340,15 @@ async function generateRecap(ctx, session, input, route, config, signal) {
     const call = await ctx.llm.prepareCall(
       { provider: route.provider, model: route.model, maxTokens: config.maxTokens, temperature: config.temperature },
       controller.signal,
+      (controls, model) => {
+        // A recap is three sentences. Ask for the route's least reasoning effort
+        // so the small output budget is not spent thinking — the shipped
+        // session-title provider does the same — which also keeps the call well
+        // inside the deadline and stops reasoning-only replies from arriving as
+        // "empty".
+        const effort = model.reasoning?.efforts?.[0]?.id
+        return effort === undefined ? controls : { ...controls, reasoningEffort: effort }
+      },
     )
     const stream = call.stream({
       ...call.config,
@@ -341,15 +358,22 @@ async function generateRecap(ctx, session, input, route, config, signal) {
       signal: controller.signal,
     })
     let text = ''
+    let finish
     for await (const chunk of stream) {
       if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text
-      else if (chunk?.type === 'finish') {
-        const kind = chunk.reason?.kind
-        if (kind === 'error' || kind === 'aborted') return null
+      else if (chunk?.type === 'finish') finish = chunk.reason
+    }
+    if (finish?.kind === 'error' || finish?.kind === 'aborted') {
+      if (timedOut) return { failure: 'timeout' }
+      if (finish.kind === 'aborted' || signal?.aborted === true) return { failure: 'aborted' }
+      return {
+        failure: 'provider',
+        ...(typeof finish.failure?.code === 'string' ? { code: finish.failure.code } : {}),
+        ...(typeof finish.failure?.message === 'string' ? { message: finish.failure.message } : {}),
       }
     }
     const recap = parseRecap(text)
-    return recap.summary === '' ? null : recap
+    return recap.summary === '' ? { failure: 'empty' } : { recap }
   } finally {
     clearTimeout(timer)
     if (signal !== undefined) signal.removeEventListener('abort', abort)
@@ -358,16 +382,16 @@ async function generateRecap(ctx, session, input, route, config, signal) {
 
 /**
  * Produce one recap for an already selected turn.
- * @returns `{ text, nextAction?, model }` on success, or `{ failure }` naming the reason.
+ * @returns `{ text, nextAction?, model }` on success, or `{ failure, code?, message? }` naming the reason.
  */
 async function recapForTurn(ctx, session, turn, config, signal) {
   const route = resolveRoute(ctx, session, config)
   if (route === undefined) return { failure: 'no-route' }
   const input = buildDigest(turnEvents(session, turn), config.digestChars)
-  if (input === null) return { failure: 'empty' }
-  const recap = await generateRecap(ctx, session, input, route, config, signal)
-  if (recap === null) return { failure: 'failed' }
-  return { text: recap.summary, nextAction: recap.nextAction, model: route.model }
+  if (input === null) return { failure: 'nothing-to-recap' }
+  const produced = await generateRecap(ctx, session, input, route, config, signal)
+  if (produced.failure !== undefined) return produced
+  return { text: produced.recap.summary, nextAction: produced.recap.nextAction, model: route.model }
 }
 
 /**
@@ -382,6 +406,14 @@ export function apply(ctx, rawConfig) {
 
   /** sessionId -> (turn -> recap entry) awaiting the turn's `turn/end` commit. */
   const pending = new Map()
+  /**
+   * sessionId -> why the most recent attempt failed.
+   *
+   * The automatic path has no caller to report to, so the reason is folded into
+   * the projection at the turn boundary and lands in the checkpoint — the only
+   * place a silent failure can still be inspected afterwards.
+   */
+  const failures = new Map()
 
   ctx.inject(['sessionProjections', 'llm'], (scoped) => {
     scoped.sessionProjections.register({
@@ -414,14 +446,21 @@ export function apply(ctx, rawConfig) {
         }
         if (event.type !== 'turn/end') return state
         if (event.data?.reason?.kind !== 'completed') return state
-        const byTurn = pending.get(state.session)
-        if (byTurn === undefined) return state
         const turn = event.data.turn
-        const entry = byTurn.get(turn)
-        if (entry === undefined) return state
-        byTurn.delete(turn)
-        if (byTurn.size === 0) pending.delete(state.session)
-        return { ...state, turns: { ...state.turns, [String(turn)]: entry } }
+        const byTurn = pending.get(state.session)
+        const entry = byTurn === undefined ? undefined : byTurn.get(turn)
+        if (byTurn !== undefined && entry !== undefined) {
+          byTurn.delete(turn)
+          if (byTurn.size === 0) pending.delete(state.session)
+        }
+        const failure = failures.get(state.session)
+        const reportedFailure = failure !== undefined && failure.turn === turn ? failure : undefined
+        if (reportedFailure !== undefined) failures.delete(state.session)
+        if (entry === undefined && reportedFailure === undefined) return state
+        let next = state
+        if (entry !== undefined) next = { ...next, turns: { ...next.turns, [String(turn)]: entry } }
+        if (reportedFailure !== undefined) next = { ...next, lastFailure: reportedFailure }
+        return next
       },
       wire: {
         viewSchema: JSON_SCHEMA,
@@ -439,7 +478,25 @@ export function apply(ctx, rawConfig) {
         const turn = payload.turn
         if (typeof turn !== 'number') return
         const result = await recapForTurn(scoped, session, turn, config, payload.signal)
-        if (result.text === undefined) return
+        if (result.text === undefined) {
+          // Nobody is waiting on a return value here: record the reason so the
+          // turn boundary can checkpoint it, and leave a line in the profile log.
+          failures.set(String(session.id), {
+            turn,
+            at: Date.now(),
+            reason: result.failure,
+            ...(result.code === undefined ? {} : { code: result.code }),
+            ...(result.message === undefined ? {} : { message: result.message.slice(0, 300) }),
+          })
+          scoped.logger?.warn?.(
+            'turn-recap: no recap for turn %d of %s: %s%s',
+            turn,
+            String(session.id),
+            result.failure,
+            result.message === undefined ? '' : ` (${result.code ?? 'no code'}: ${result.message})`,
+          )
+          return
+        }
         const key = String(session.id)
         let byTurn = pending.get(key)
         if (byTurn === undefined) {
@@ -462,6 +519,7 @@ export function apply(ctx, rawConfig) {
 
     scoped.on('session/disposed', (session) => {
       pending.delete(String(session.id))
+      failures.delete(String(session.id))
     })
 
     // `/recap` runs outside any turn (the command lifecycle is log-only), so
@@ -480,11 +538,23 @@ export function apply(ctx, rawConfig) {
             switch (result.failure) {
               case 'no-route':
                 return { kind: 'error', text: 'Recap is unavailable: no model route could be resolved.' }
-              case 'empty':
+              case 'nothing-to-recap':
                 return { kind: 'error', text: 'The latest turn has no request, reply, or tool call to recap.' }
-              case 'failed':
-                return { kind: 'error', text: 'The recap request failed, timed out, or was interrupted.' }
-              default:
+              case 'timeout':
+                return {
+                  kind: 'error',
+                  text: `The recap request timed out after ${Math.round(config.timeoutMs / 1000)}s. Try again, or raise timeoutMs in the plugin config.`,
+                }
+              case 'aborted':
+                return { kind: 'error', text: 'The recap request was interrupted before the model answered.' }
+              case 'provider':
+                return {
+                  kind: 'error',
+                  text: `The recap request was refused by the provider: ${result.code ?? 'unknown error'}${result.message === undefined ? '' : ` — ${result.message}`}`,
+                }
+              case 'empty':
+                return { kind: 'error', text: 'The model answered without any recap text.' }
+              case undefined:
                 // `command/done` carries text only, so the optional action rides
                 // on the same `Next:` line the prompt uses; the Client splits it
                 // back out and labels it in the active locale.
@@ -492,6 +562,8 @@ export function apply(ctx, rawConfig) {
                   kind: 'success',
                   text: result.nextAction === undefined ? result.text : `${result.text}\n\nNext: ${result.nextAction}`,
                 }
+              default:
+                return { kind: 'error', text: `The recap request failed (${result.failure}).` }
             }
           } catch (error) {
             return { kind: 'error', text: `Recap failed: ${error instanceof Error ? error.message : String(error)}` }
