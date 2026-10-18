@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Turn Recap",
+    "description": "Shows a short model-written recap under every completed turn; /recap regenerates one on demand."
+  }
+}

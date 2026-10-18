@@ -1,0 +1,13 @@
+# Dependencies installed by a profile's plugin manager
+node_modules/
+pnpm-lock.yaml
+
+# Editor and OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local scratch and logs
+.scratch/
+*.log

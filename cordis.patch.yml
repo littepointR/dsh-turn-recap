@@ -1,0 +1,17 @@
+# Turn recap — one card under every completed turn of the Web UI, plus a
+# `/recap` command that regenerates the latest turn's recap on demand.
+#
+# Every key below is optional; the row's `config` block overrides the defaults
+# in index.js. Uncomment and edit a value to tune it:
+#
+#   enabled: true          # false leaves the row unregistered
+#   maxTokens: 200         # output budget of the recap request
+#   temperature: 0.2
+#   timeoutMs: 12000       # hard bound on the recap request, in milliseconds
+#   digestChars: 6000      # size bound of the turn digest sent to the model
+#   skipSubagents: true    # subagent sessions get no recap row
+#   provider: ...          # explicit route; defaults to the turn's own model
+#   model: ...
+- insert:
+    - id: turn-recap
+      name: '@local/dsh-turn-recap'
