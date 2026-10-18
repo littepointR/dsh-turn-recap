@@ -364,6 +364,25 @@ export function apply(ctx, rawConfig) {
       stateSchema: JSON_SCHEMA,
       init: (header) => ({ session: String(header.id), turns: {} }),
       apply: (state, event) => {
+        if (event.type === 'turn/start') {
+          // A prompt that lands before a finished turn earned its quiet window
+          // withdraws that card for good. A turn whose window already elapsed
+          // keeps its card, so returning to a session still shows it. Deciding
+          // here — on a committed event — is what lets the Client reveal by
+          // wall-clock time instead of running its own timers.
+          let changed = false
+          const next = {}
+          for (const [key, value] of Object.entries(state.turns)) {
+            const timed = value !== null && typeof value === 'object' && typeof value.revealAt === 'number'
+            if (!timed || value.superseded === true || event.time >= value.revealAt) {
+              next[key] = value
+              continue
+            }
+            next[key] = { ...value, superseded: true }
+            changed = true
+          }
+          return changed ? { ...state, turns: next } : state
+        }
         if (event.type !== 'turn/end') return state
         if (event.data?.reason?.kind !== 'completed') return state
         const byTurn = pending.get(state.session)

@@ -158,11 +158,28 @@ check('recap text normalized', published.turns['2'].text, 'Built the plugin and 
 check('recap carries model', published.turns['2'].model, 'm1')
 check('recap carries a reveal deadline', published.turns['2'].revealAt - published.turns['2'].at, 120_000)
 
+// A prompt that lands inside the quiet window withdraws the card; one that
+// lands after it leaves the card standing.
+const earlyStart = runtime.definition.apply(state, {
+  type: 'turn/start',
+  time: published.turns['2'].revealAt - 1_000,
+  data: { turn: 3 },
+})
+check('a prompt inside the window withdraws the card', earlyStart.turns['2'].superseded, true)
+const lateStart = runtime.definition.apply(state, {
+  type: 'turn/start',
+  time: published.turns['2'].revealAt + 1_000,
+  data: { turn: 3 },
+})
+check('a prompt after the window keeps the card', lateStart, state)
+
 await runtime.fire('agent/turn-stopping', { agent: { session: liveSession('s1') }, turn: 2, signal: new AbortController().signal })
 check('aborted turn unchanged', runtime.definition.apply(state, { type: 'turn/end', seq: 12, data: { turn: 2, reason: { kind: 'aborted' } } }), state)
 
 await runtime.fire('agent/turn-stopping', { agent: { session: liveSession('s2', { origin: 'subagent' }) }, turn: 2, signal: new AbortController().signal })
-check('subagent turn unchanged', runtime.definition.apply(state, { type: 'turn/end', seq: 13, data: { turn: 2, reason: { kind: 'completed' } } }), state)
+// A turn number with no pending entry, so this assertion cannot depend on how
+// long the earlier aborted-turn case took.
+check('subagent turn unchanged', runtime.definition.apply(state, { type: 'turn/end', seq: 13, data: { turn: 9, reason: { kind: 'completed' } } }), state)
 
 // A second session keeps its own recap entries.
 await runtime.fire('agent/turn-stopping', { agent: { session: liveSession('s2') }, turn: 2, signal: new AbortController().signal })

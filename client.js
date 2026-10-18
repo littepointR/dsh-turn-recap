@@ -11,17 +11,6 @@ window.__ModuleLoader__.load({
     /** Command whose lifecycle row renders through the custom card below. */
     const COMMAND = 'recap'
 
-    /**
-     * Cards this page already revealed, keyed by `sessionId#turn`.
-     *
-     * A revealed card must survive the component unmounting (the chat view
-     * remounts rows while scrolling), and it must not disappear when the user
-     * comes back and starts a new turn. The page holds the latch for the rest
-     * of its life; a reload re-evaluates from `revealAt`, which is what lets a
-     * reopened session show where it left off.
-     */
-    const revealedCards = new Set()
-
     /** Component-local styles; render as an element so unmounting removes them. */
     const CSS = [
       '.dsh-turn-recap{display:flex;flex-direction:column;gap:6px;margin-top:8px;padding:10px 12px;',
@@ -85,49 +74,38 @@ window.__ModuleLoader__.load({
     /**
      * Closing-turn recap over the Host's `recap` projection.
      *
-     * The Host wrote the text before the turn boundary committed, but the card
-     * waits for `revealAt` — the end of the configured quiet window — and stays
-     * away entirely if a newer turn started before that instant. It is a
-     * "where did I leave off" card, not a second summary of a reply the user is
-     * still reading.
-     * @param props - closing turn, projection hook, chat hook, and localized copy.
+     * The Host wrote the text before the turn boundary committed. Whether the
+     * card may show is decided by wall-clock time — `revealAt`, the end of the
+     * configured quiet window — and by the Host's `superseded` mark, which a
+     * prompt arriving inside that window sets. Nothing here holds a one-shot
+     * timer: a throttled or missed timer would have hidden the card for good,
+     * so the rule is re-evaluated on every render and a ticker only nudges the
+     * page while the window is still running.
+     * @param props - closing turn, projection hook, and localized copy.
      * @returns the recap row, or null while it is held back or absent.
      */
     function TurnRecap(props) {
       const turn = props.turn
       const useProjection = props.useProjection
-      const useChat = props.useChat
       const t = props.t
       const projection = typeof useProjection === 'function' ? useProjection(PROJECTION) : undefined
       const turns = projection !== null && typeof projection === 'object' ? projection.turns : undefined
       const entry = turns !== null && typeof turns === 'object' ? turns[String(turn)] : undefined
       const ready = entry !== null && typeof entry === 'object' && typeof entry.text === 'string' && entry.text !== ''
-      const key = `${typeof props.sessionId === 'string' ? props.sessionId : ''}#${String(turn)}`
       // An entry cached before reveal timing existed has no `revealAt`; 0 keeps
       // it visible instead of hiding history behind a window it predates.
       const revealAt = ready && typeof entry.revealAt === 'number' ? entry.revealAt : 0
-      const [revealed, setRevealed] = React.useState(() => !ready || Date.now() >= revealAt || revealedCards.has(key))
-      const latestTurn = typeof useChat === 'function' ? useChat((snapshot) => snapshot?.timeline?.turnOrder?.at(-1)) : undefined
+      const superseded = ready && entry.superseded === true
+      const due = ready && !superseded && Date.now() >= revealAt
+      const [, tick] = React.useState(0)
 
       React.useEffect(() => {
-        if (!ready || revealed) return undefined
-        // A newer turn means the user kept working: this card never earned its
-        // quiet window, so it stays hidden for good.
-        if (latestTurn !== undefined && latestTurn !== turn) return undefined
-        const show = () => {
-          revealedCards.add(key)
-          setRevealed(true)
-        }
-        const remaining = revealAt - Date.now()
-        if (remaining <= 0) {
-          show()
-          return undefined
-        }
-        const timer = setTimeout(show, remaining)
-        return () => clearTimeout(timer)
-      }, [ready, revealed, latestTurn, turn, revealAt, key])
+        if (ready === false || superseded || due) return undefined
+        const timer = setInterval(() => tick((value) => value + 1), 1000)
+        return () => clearInterval(timer)
+      }, [ready, superseded, due])
 
-      if (!ready || !revealed) return null
+      if (!due) return null
       const label = typeof t === 'function' ? t('title') : 'Turn recap'
       const model = typeof entry.model === 'string' && entry.model !== '' ? entry.model : null
       return h(Card, { label, meta: model, body: entry.text, state: 'ok' })
